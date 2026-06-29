@@ -1,2 +1,4 @@
 open3d
 numpy
+trimesh
+pymeshlab
