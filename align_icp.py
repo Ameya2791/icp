@@ -1,4 +1,4 @@
-"""
+r"""
 Align a damaged brick scan to a healthy brick scan using ICP.
 
 The damaged brick is used as the source cloud. The healthy brick is used as
@@ -48,12 +48,22 @@ overlay_colored.ply:
 transformation_matrix.txt:
     ICP transformation matrix applied to the damaged scan.
 
+Folder Layout
+-------------
+LiDAR Project/
+    icp/
+        align_icp.py
+    meshes/
+        healthy_brick.obj
+        damaged_brick_1.obj
+        damaged_brick_2.obj
+
 Example
 -------
-python scripts/align_icp.py \
-    --source data/cleaned_meshes/damaged_brick_1_clean.obj \
-    --target data/cleaned_meshes/healthy_ref_clean.obj \
-    --out_dir outputs/damaged_brick_1/icp \
+python .\icp\align_icp.py \
+    --source .\meshes\damaged_brick_1.obj \
+    --target .\meshes\healthy_brick.obj \
+    --out_dir .\icp\outputs\damaged_brick_1 \
     --visualize
 """
 
@@ -68,6 +78,7 @@ DEFAULT_POINTS = 50000
 DEFAULT_VOXEL_SIZE = 0.005
 DEFAULT_ICP_THRESHOLD = 0.02
 DEFAULT_DIFF_THRESHOLD = 0.0025
+LARGE_MISSING_FRACTION = 0.35
 
 
 def read_mesh(file_path):
@@ -198,13 +209,13 @@ def parse_arguments():
     # Files
     parser.add_argument("--source", default="source.obj")
     parser.add_argument("--target", default="target.obj")
-    parser.add_argument("--out_dir", default="icp_output")
+    parser.add_argument("--out_dir", "--out-dir", default="icp_output")
 
     # ICP settings
     parser.add_argument("--points", type=int, default=DEFAULT_POINTS)
-    parser.add_argument("--voxel_size", type=float, default=DEFAULT_VOXEL_SIZE)
-    parser.add_argument("--icp_threshold", type=float, default=DEFAULT_ICP_THRESHOLD)
-    parser.add_argument("--diff_threshold", type=float, default=DEFAULT_DIFF_THRESHOLD)
+    parser.add_argument("--voxel_size", "--voxel-size", type=float, default=DEFAULT_VOXEL_SIZE)
+    parser.add_argument("--icp_threshold", "--icp-threshold", type=float, default=DEFAULT_ICP_THRESHOLD)
+    parser.add_argument("--diff_threshold", "--diff-threshold", type=float, default=DEFAULT_DIFF_THRESHOLD)
 
     # Display
     parser.add_argument("--visualize", action="store_true")
@@ -263,9 +274,16 @@ def main():
 
     missing_count = len(missing_piece.points)
     extra_count = len(source_extra.points)
+    target_count = len(healthy_cloud.points)
 
     print(f"missing-piece points: {missing_count}")
     print(f"source-only points:   {extra_count}")
+
+    if target_count > 0 and missing_count / target_count > LARGE_MISSING_FRACTION:
+        print()
+        print("WARNING: missing-piece point count is very large.")
+        print("This can mean ICP alignment failed, source/target were swapped,")
+        print("the OBJ units need larger thresholds, or the scans are at different scales.")
 
     print("Saving files")
     save_results(
