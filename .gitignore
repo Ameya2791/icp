@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.pyc
+outputs/
+*.ply
+damage_aware_icp.py
+similarity_damage_aware_icp.py
