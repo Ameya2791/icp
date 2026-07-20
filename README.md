@@ -17,10 +17,11 @@ icp/
 |-- align_icp.py
 |-- requirements.txt
 |-- README.md
-`-- meshes/                         optional sample data
-    |-- healthy_brick.obj
-    |-- damaged_brick_1.obj
-    `-- damaged_brick_2.obj
+`-- data/                         optional sample data
+    `--raw_scans/
+        |-- healthy_brick.obj
+        |-- damaged_brick_1.obj
+        `-- damaged_brick_2.obj
 ```
 
 If mesh files are too large for GitHub, keep them outside the repository or use Git LFS.
