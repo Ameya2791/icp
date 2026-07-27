@@ -1,129 +1,128 @@
-# LiDAR Brick ICP Alignment
+# LiDAR Brick Alignment and Volume Analysis
 
-This repository contains a Python workflow for aligning damaged brick scans to an intact reference brick scan using Iterative Closest Point (ICP). The workflow was developed for LiDAR-based brick damage analysis using OBJ meshes exported from Polycam Object Mode.
+This repository contains a Python workflow for comparing damaged brick scans
+with an intact reference brick. The scans are captured in Polycam Object Mode
+and exported as OBJ meshes.
 
-The main script is `align_icp.py`. It aligns a damaged brick scan to a healthy reference brick scan, then extracts healthy-reference points that are not matched by the damaged scan. These unmatched reference points represent missing material.
+The workflow has three stages:
 
-## Main Idea
-
-The damaged brick is always the source. The healthy brick is always the target.
-
-After ICP alignment, the script computes nearest-neighbor distances from the healthy reference point cloud to the aligned damaged point cloud. If a healthy-reference point is farther than the selected difference threshold, it is saved as missing material.
+1. Scale each Polycam mesh to measured physical dimensions.
+2. Align a damaged brick with the healthy reference using Iterative Closest
+   Point (ICP).
+3. Estimate missing volume with a shared solid voxel grid.
 
 ## Repository Layout
 
 ```text
 icp/
 |-- align_icp.py
+|-- scale_brick_meshes.py
+|-- voxel_volume_analysis.py
 |-- requirements.txt
-|-- README.md
-`-- data/                         optional sample data
-    `--raw_scans/
-        |-- healthy_brick.obj
-        |-- damaged_brick_1.obj
-        `-- damaged_brick_2.obj
+`-- README.md
 ```
 
-If mesh files are too large for GitHub, keep them outside the repository or use Git LFS.
+The original OBJ scans and generated output files are not required in the
+repository. Large meshes can be supplied separately or managed with Git LFS.
 
 ## Dependencies
 
-The project uses:
+The scripts use:
 
 ```text
 numpy
 open3d
 ```
 
-Install dependencies with:
+Install the dependencies with:
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-Check that Open3D is installed:
+## Input Files
 
-```powershell
-python -c "import open3d as o3d; import numpy as np; print(o3d.__version__)"
+The examples below assume this folder structure:
+
+```text
+LiDAR Project/
+|-- icp/
+|   |-- align_icp.py
+|   |-- scale_brick_meshes.py
+|   `-- voxel_volume_analysis.py
+`-- meshes/
+    |-- healthy_brick.obj
+    |-- damaged_brick_1.obj
+    |-- damaged_brick_2.obj
+    `-- damaged_brick_3.obj
 ```
 
-## Running the ICP Script
+Run all commands from the `LiDAR Project` folder.
 
-Run commands from the project folder that contains `icp/` and `meshes/`.
+## 1. Scale the Polycam Meshes
+
+Polycam did not assign exactly the same scale to every scan. The scale factors
+were calculated by comparing oriented mesh dimensions with physical brick
+measurements.
+
+```text
+healthy brick:   0.280300
+damaged brick 1: 0.289638
+damaged brick 2: 0.317342
+damaged brick 3: 0.282977
+```
+
+The factors are stored in `scale_brick_meshes.py`. Run:
+
+```powershell
+python .\icp\scale_brick_meshes.py `
+  --input_dir .\meshes `
+  --out_dir .\meshes\scaled
+```
+
+The script leaves the original OBJ files unchanged. It creates scaled copies
+and writes `mesh_scale_factors.csv` with the applied factors and final mesh
+dimensions.
+
+## 2. Run ICP Alignment
+
+The damaged brick is the source and the healthy brick is the target. Always use
+the scaled meshes for the volume-analysis workflow.
 
 Example for damaged brick 1:
 
 ```powershell
 python .\icp\align_icp.py `
-  --source .\meshes\damaged_brick_1.obj `
-  --target .\meshes\healthy_brick.obj `
-  --out_dir .\icp\outputs\damaged_brick_1 `
-  --icp_threshold 0.04 `
-  --diff_threshold 0.015 `
+  --source .\meshes\scaled\damaged_brick_1.obj `
+  --target .\meshes\scaled\healthy_brick.obj `
+  --out_dir .\icp\outputs\scaled\damaged_brick_1\icp `
+  --points 50000 `
+  --voxel_size 0.002 `
+  --icp_threshold 0.012 `
+  --diff_threshold 0.004 `
   --visualize
 ```
 
-Example for damaged brick 2:
+For another specimen, change the source filename and output folder.
 
-```powershell
-python .\icp\align_icp.py `
-  --source .\meshes\damaged_brick_2.obj `
-  --target .\meshes\healthy_brick.obj `
-  --out_dir .\icp\outputs\damaged_brick_2 `
-  --icp_threshold 0.04 `
-  --diff_threshold 0.015 `
-  --visualize
-```
-
-The exact threshold values should be tuned for the scan quality and amount of material loss.
-
-## Script Arguments
+### ICP Arguments
 
 ```text
 --source          damaged brick OBJ file
 --target          healthy reference OBJ file
 --out_dir         folder where outputs are saved
 --points          number of mesh surface points to sample
---voxel_size      voxel size for downsampling
---icp_threshold   correspondence distance used during ICP
---diff_threshold  distance used to classify missing/material-loss points
+--voxel_size      voxel size used for ICP downsampling
+--icp_threshold   maximum ICP correspondence distance
+--diff_threshold  distance used to classify unmatched surface points
 --visualize       show the colored Open3D overlay
 ```
 
-The script also accepts hyphenated versions of selected options, such as `--out-dir`, `--voxel-size`, `--icp-threshold`, and `--diff-threshold`.
+`icp_threshold` controls which point pairs can be used during registration.
+`diff_threshold` controls which aligned surface points are classified as
+unmatched. Both thresholds use the same units as the scaled meshes.
 
-## Threshold Guidance
-
-`icp_threshold` controls how far apart points can be during ICP correspondence matching.
-
-```text
-smaller value = stricter alignment correspondences
-larger value  = more permissive alignment correspondences
-```
-
-`diff_threshold` controls what is classified as missing material after alignment.
-
-```text
-smaller value = more healthy-reference points marked as missing
-larger value  = fewer healthy-reference points marked as missing
-```
-
-For meter-scale OBJ files, useful starting values are:
-
-```text
-icp_threshold:  0.04 to 0.08
-diff_threshold: 0.010 to 0.030
-```
-
-If the OBJ files are exported in millimeters instead of meters, scale the distance parameters by 1000:
-
-```text
---voxel_size 5 --icp_threshold 40 --diff_threshold 15
-```
-
-## Output Files
-
-Each run writes the following files to `--out_dir`:
+### ICP Outputs
 
 ```text
 aligned_source.obj
@@ -134,34 +133,86 @@ overlay_colored.ply
 transformation_matrix.txt
 ```
 
-`aligned_source.obj` is the damaged mesh after ICP alignment.
-
-`aligned_source.ply` is the sampled damaged point cloud after ICP alignment.
-
-`missing_piece_target_only.ply` is the main missing-material output. It contains points from the healthy reference brick that do not have a nearby match in the aligned damaged scan.
-
-`source_only_extra.ply` contains damaged-scan points that do not match the healthy reference. These regions can indicate fracture roughness, scan noise, loose fragments, or alignment error.
-
-`overlay_colored.ply` is a colored point-cloud overlay for visual inspection.
-
-`transformation_matrix.txt` stores the ICP transformation matrix applied to the damaged scan.
-
-## Overlay Color Key
+The overlay colors are:
 
 ```text
-green = healthy reference brick
-gray  = damaged brick after ICP alignment
-blue  = missing/material-loss region from the healthy reference
-red   = damaged-only extra points, fracture roughness, scan noise, or alignment error
+green = healthy reference
+gray  = aligned damaged brick
+blue  = unmatched healthy-reference surface points
+red   = damaged-only points
 ```
 
-A good alignment should show strong overlap between the green reference and gray damaged scan over intact regions. Blue should appear where material is absent from the damaged brick. Red should be limited to rough fractured areas or small unmatched regions.
+The unmatched-point percentage is a surface comparison. It should not be
+reported as physical missing-volume percentage.
 
-If the damaged brick is smaller or eroded on many sides, the blue missing-material region may appear around multiple faces rather than as one localized chunk.
+## 3. Estimate Missing Volume
 
-## Notes for GitHub
+`voxel_volume_analysis.py` places the healthy and aligned damaged meshes on the
+same grid. It tests voxel centers against the closed mesh surfaces and treats
+the occupied voxels as solid volume.
 
-Do not commit generated outputs or Python cache files:
+```powershell
+python .\icp\voxel_volume_analysis.py `
+  --healthy .\meshes\scaled\healthy_brick.obj `
+  --damaged .\icp\outputs\scaled\damaged_brick_1\icp\aligned_source.obj `
+  --out_dir .\icp\outputs\scaled\damaged_brick_1\voxel_volume `
+  --voxel_size 0.002 `
+  --ray_samples 3 `
+  --units m `
+  --visualize
+```
+
+### Volume Arguments
+
+```text
+--healthy       physically scaled healthy reference mesh
+--damaged       physically scaled and ICP-aligned damaged mesh
+--out_dir       folder where volume outputs are saved
+--voxel_size    side length of each voxel
+--ray_samples   odd number of occupancy rays used per voxel
+--units         mesh units: m, cm, or mm
+--visualize     show the colored voxel comparison
+```
+
+### Volume Outputs
+
+```text
+voxel_volume_results.csv
+missing_volume_voxels.ply
+damaged_only_voxels.ply
+voxel_overlay_colored.ply
+```
+
+The volume overlay colors are:
+
+```text
+gray = volume shared by both bricks
+blue = healthy-only volume, interpreted as missing material
+red  = damaged-only volume
+```
+
+`voxel_volume_results.csv` reports healthy volume, damaged volume, estimated
+missing volume, damaged-only volume, overlap, containment, and
+intersection-over-union.
+
+## Result Checks
+
+A volume result should be inspected before it is used:
+
+- ICP fitness and RMSE should indicate stable registration.
+- Intact regions should overlap in the ICP visualization.
+- Damaged-brick containment should be high.
+- Damaged-only volume should be small relative to the healthy volume.
+- Results should be checked at more than one voxel size.
+- Digital volume should be compared with a physical measurement such as water
+  displacement.
+
+The voxel method requires closed meshes. The script stops if a mesh remains
+non-watertight after duplicate vertices are merged.
+
+## Files Excluded From Git
+
+Generated outputs and Python cache files should not be committed:
 
 ```text
 outputs/
@@ -170,4 +221,5 @@ __pycache__/
 *.ply
 ```
 
-OBJ meshes can be committed only if they are small enough and intended as sample data. For large scan files, use Git LFS or provide the data separately.
+OBJ scans should only be committed when they are intentionally included as
+small sample data.
