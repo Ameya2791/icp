@@ -26,6 +26,10 @@ voxel_volume_results.csv:
 missing_volume_voxels.ply:
     Centers of voxels occupied by the healthy brick but not the damaged brick.
 
+missing_repair_mesh.obj:
+    Closed boundary mesh generated from the largest face-connected missing
+    region. All missing regions remain available in missing_volume_voxels.ply.
+
 damaged_only_voxels.ply:
     Centers of voxels occupied by the damaged brick but not the healthy brick.
 
@@ -47,6 +51,7 @@ python .\icp\voxel_volume_analysis.py \
 from pathlib import Path
 import argparse
 import csv
+from collections import deque
 
 import numpy as np
 import open3d as o3d
@@ -54,6 +59,7 @@ import open3d as o3d
 
 DEFAULT_VOXEL_SIZE = 0.005
 DEFAULT_RAY_SAMPLES = 3
+DEFAULT_MESH_STEP = 2
 MAX_GRID_CELLS = 50000000
 LARGE_EXTRA_FRACTION = 0.10
 LOW_CONTAINMENT_FRACTION = 0.85
@@ -163,6 +169,273 @@ def grid_to_point_cloud(mask, grid_min, voxel_size, color):
     return point_cloud
 
 
+def grid_to_triangle_mesh(mask, grid_min, voxel_size):
+    if not np.any(mask):
+        return o3d.geometry.TriangleMesh()
+
+    field = np.pad(mask.astype(np.uint8), 1)
+    field_origin = grid_min - 0.5 * voxel_size
+
+    cube_corners = np.asarray(
+        [
+            (0, 0, 0),
+            (1, 0, 0),
+            (1, 1, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 0, 1),
+            (1, 1, 1),
+            (0, 1, 1)
+        ],
+        dtype=int
+    )
+    tetrahedra = (
+        (0, 5, 1, 6),
+        (0, 1, 2, 6),
+        (0, 2, 3, 6),
+        (0, 3, 7, 6),
+        (0, 7, 4, 6),
+        (0, 4, 5, 6)
+    )
+    tetrahedron_edges = (
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (1, 2),
+        (1, 3),
+        (2, 3)
+    )
+
+    cube_counts = (
+        field[:-1, :-1, :-1]
+        + field[1:, :-1, :-1]
+        + field[1:, 1:, :-1]
+        + field[:-1, 1:, :-1]
+        + field[:-1, :-1, 1:]
+        + field[1:, :-1, 1:]
+        + field[1:, 1:, 1:]
+        + field[:-1, 1:, 1:]
+    )
+    boundary_cubes = np.argwhere((cube_counts > 0) & (cube_counts < 8))
+
+    edge_vertex_ids = {}
+    vertices = []
+    triangles = []
+
+    def get_edge_vertex(point_a, point_b):
+        endpoint_a = tuple(int(value) for value in point_a)
+        endpoint_b = tuple(int(value) for value in point_b)
+        edge_key = tuple(sorted((endpoint_a, endpoint_b)))
+
+        if edge_key not in edge_vertex_ids:
+            midpoint = (np.asarray(endpoint_a) + np.asarray(endpoint_b)) / 2
+            world_point = field_origin + midpoint * voxel_size
+            edge_vertex_ids[edge_key] = len(vertices)
+            vertices.append(world_point)
+
+        return edge_vertex_ids[edge_key]
+
+    for boundary_cube in boundary_cubes:
+        cube_origin = np.asarray(boundary_cube, dtype=int)
+        corner_points = cube_origin + cube_corners
+        corner_values = np.asarray(
+            [field[tuple(point)] for point in corner_points],
+            dtype=np.uint8
+        )
+
+        for tetrahedron in tetrahedra:
+            local_values = corner_values[list(tetrahedron)]
+
+            if np.all(local_values == 0) or np.all(local_values == 1):
+                continue
+
+            local_points = corner_points[list(tetrahedron)]
+            polygon_vertex_ids = []
+
+            for edge_start, edge_end in tetrahedron_edges:
+                if local_values[edge_start] == local_values[edge_end]:
+                    continue
+
+                vertex_id = get_edge_vertex(
+                    local_points[edge_start],
+                    local_points[edge_end]
+                )
+
+                if vertex_id not in polygon_vertex_ids:
+                    polygon_vertex_ids.append(vertex_id)
+
+            if len(polygon_vertex_ids) < 3:
+                continue
+
+            inside_points = local_points[local_values == 1]
+            outside_points = local_points[local_values == 0]
+            outward_direction = (
+                outside_points.mean(axis=0) - inside_points.mean(axis=0)
+            )
+            outward_length = np.linalg.norm(outward_direction)
+
+            if outward_length == 0:
+                continue
+
+            outward_direction = outward_direction / outward_length
+            polygon_points = np.asarray(
+                [vertices[index] for index in polygon_vertex_ids]
+            )
+            polygon_center = polygon_points.mean(axis=0)
+            first_direction = polygon_points[0] - polygon_center
+            first_length = np.linalg.norm(first_direction)
+
+            if first_length == 0:
+                continue
+
+            first_direction = first_direction / first_length
+            second_direction = np.cross(
+                outward_direction,
+                first_direction
+            )
+            second_length = np.linalg.norm(second_direction)
+
+            if second_length == 0:
+                continue
+
+            second_direction = second_direction / second_length
+            angles = []
+
+            for point in polygon_points:
+                offset = point - polygon_center
+                angle = np.arctan2(
+                    np.dot(offset, second_direction),
+                    np.dot(offset, first_direction)
+                )
+                angles.append(angle)
+
+            order = np.argsort(angles)
+            ordered_ids = [polygon_vertex_ids[index] for index in order]
+
+            first_triangle = np.asarray(
+                [
+                    vertices[ordered_ids[0]],
+                    vertices[ordered_ids[1]],
+                    vertices[ordered_ids[2]]
+                ]
+            )
+            triangle_normal = np.cross(
+                first_triangle[1] - first_triangle[0],
+                first_triangle[2] - first_triangle[0]
+            )
+
+            if np.dot(triangle_normal, outward_direction) < 0:
+                ordered_ids.reverse()
+
+            for index in range(1, len(ordered_ids) - 1):
+                triangles.append(
+                    [
+                        ordered_ids[0],
+                        ordered_ids[index],
+                        ordered_ids[index + 1]
+                    ]
+                )
+
+    mesh = o3d.geometry.TriangleMesh()
+
+    if not vertices:
+        return mesh
+
+    mesh.vertices = o3d.utility.Vector3dVector(np.asarray(vertices, dtype=float))
+    mesh.triangles = o3d.utility.Vector3iVector(np.asarray(triangles, dtype=int))
+    mesh.remove_duplicated_triangles()
+    mesh.remove_degenerate_triangles()
+    mesh.remove_unreferenced_vertices()
+    mesh.compute_vertex_normals()
+    return mesh
+
+
+def label_grid_components(mask):
+    labels = np.full(mask.shape, -1, dtype=np.int32)
+    component_id = 0
+    size_x, size_y, size_z = mask.shape
+
+    for start_cell in np.argwhere(mask):
+        start = tuple(int(value) for value in start_cell)
+
+        if labels[start] != -1:
+            continue
+
+        labels[start] = component_id
+        queue = deque([start])
+
+        while queue:
+            x, y, z = queue.popleft()
+
+            neighbors = (
+                (x - 1, y, z),
+                (x + 1, y, z),
+                (x, y - 1, z),
+                (x, y + 1, z),
+                (x, y, z - 1),
+                (x, y, z + 1)
+            )
+
+            for neighbor_x, neighbor_y, neighbor_z in neighbors:
+                inside = (
+                    0 <= neighbor_x < size_x
+                    and 0 <= neighbor_y < size_y
+                    and 0 <= neighbor_z < size_z
+                )
+
+                if not inside:
+                    continue
+                if not mask[neighbor_x, neighbor_y, neighbor_z]:
+                    continue
+                if labels[neighbor_x, neighbor_y, neighbor_z] != -1:
+                    continue
+
+                labels[neighbor_x, neighbor_y, neighbor_z] = component_id
+                queue.append((neighbor_x, neighbor_y, neighbor_z))
+
+        component_id += 1
+
+    return labels
+
+
+def get_largest_component(mask):
+    labels = label_grid_components(mask)
+    occupied_labels = labels[mask]
+
+    if len(occupied_labels) == 0:
+        return np.zeros_like(mask), 0, 0
+
+    component_sizes = np.bincount(occupied_labels)
+    largest_id = int(np.argmax(component_sizes))
+    largest_mask = labels == largest_id
+    return largest_mask, len(component_sizes), int(component_sizes[largest_id])
+
+
+def downsample_mask(mask, step):
+    if step == 1:
+        return mask
+
+    padding = []
+    for size in mask.shape:
+        remainder = size % step
+        padding.append((0, 0 if remainder == 0 else step - remainder))
+
+    padded_mask = np.pad(mask, padding)
+    new_shape = (
+        padded_mask.shape[0] // step,
+        step,
+        padded_mask.shape[1] // step,
+        step,
+        padded_mask.shape[2] // step,
+        step
+    )
+
+    grouped_mask = padded_mask.reshape(new_shape)
+    occupied_counts = grouped_mask.sum(axis=(1, 3, 5))
+    minimum_count = int(np.ceil(step ** 3 / 2))
+    return occupied_counts >= minimum_count
+
+
 def volume_to_cm3(volume, units):
     if units == "m":
         return volume * 1000000
@@ -231,6 +504,7 @@ def save_results(
     healthy_mesh,
     damaged_mesh,
     missing_cloud,
+    missing_mesh,
     extra_cloud,
     overlap_cloud
 ):
@@ -249,6 +523,12 @@ def save_results(
     o3d.io.write_point_cloud(
         str(output_folder / "missing_volume_voxels.ply"),
         missing_cloud
+    )
+    o3d.io.write_triangle_mesh(
+        str(output_folder / "missing_repair_mesh.obj"),
+        missing_mesh,
+        write_vertex_normals=False,
+        write_triangle_uvs=False
     )
     o3d.io.write_point_cloud(
         str(output_folder / "damaged_only_voxels.ply"),
@@ -326,6 +606,12 @@ def parse_arguments():
         default=DEFAULT_RAY_SAMPLES
     )
     parser.add_argument(
+        "--mesh_step",
+        "--mesh-step",
+        type=int,
+        default=DEFAULT_MESH_STEP
+    )
+    parser.add_argument(
         "--units",
         choices=["m", "cm", "mm"],
         default="m"
@@ -344,6 +630,8 @@ def main():
         raise ValueError("voxel_size must be greater than zero")
     if args.ray_samples <= 0 or args.ray_samples % 2 == 0:
         raise ValueError("ray_samples must be a positive odd number")
+    if args.mesh_step <= 0:
+        raise ValueError("mesh_step must be a positive integer")
 
     print("Loading meshes")
     healthy_mesh = read_mesh(args.healthy)
@@ -396,6 +684,9 @@ def main():
     missing_mask = healthy_solid & ~damaged_solid
     extra_mask = damaged_solid & ~healthy_solid
     overlap_mask = healthy_solid & damaged_solid
+    repair_mask, repair_region_count, repair_voxel_count = get_largest_component(
+        missing_mask
+    )
 
     results = calculate_results(
         healthy_solid=healthy_solid,
@@ -412,7 +703,7 @@ def main():
     print_results(results)
     print_warnings(results)
 
-    print("Creating output point clouds")
+    print("Creating output geometry")
     missing_cloud = grid_to_point_cloud(
         missing_mask,
         grid_min,
@@ -431,6 +722,35 @@ def main():
         args.voxel_size,
         [0.7, 0.7, 0.7]
     )
+    repair_mesh_mask = downsample_mask(repair_mask, args.mesh_step)
+    repair_mesh_voxel_size = args.voxel_size * args.mesh_step
+    missing_mesh = grid_to_triangle_mesh(
+        repair_mesh_mask,
+        grid_min,
+        repair_mesh_voxel_size
+    )
+
+    repair_fraction = (
+        100 * repair_voxel_count / results["missing_voxels"]
+        if results["missing_voxels"]
+        else 0
+    )
+    results["missing_region_count"] = repair_region_count
+    results["repair_mesh_voxels"] = repair_voxel_count
+    results["repair_mesh_fraction_percent"] = repair_fraction
+    results["repair_mesh_voxel_size"] = repair_mesh_voxel_size
+    results["repair_mesh_volume_cm3"] = volume_to_cm3(
+        repair_voxel_count * args.voxel_size ** 3,
+        args.units
+    )
+    results["missing_mesh_vertices"] = len(missing_mesh.vertices)
+    results["missing_mesh_triangles"] = len(missing_mesh.triangles)
+    results["missing_mesh_watertight"] = missing_mesh.is_watertight()
+    results["repair_mesh_enclosed_volume_cm3"] = (
+        volume_to_cm3(missing_mesh.get_volume(), args.units)
+        if missing_mesh.is_watertight()
+        else ""
+    )
 
     print("Saving files")
     save_results(
@@ -439,6 +759,7 @@ def main():
         healthy_mesh=healthy_mesh,
         damaged_mesh=damaged_mesh,
         missing_cloud=missing_cloud,
+        missing_mesh=missing_mesh,
         extra_cloud=extra_cloud,
         overlap_cloud=overlap_cloud
     )
